@@ -627,8 +627,30 @@ auth_on_publish(User, SubscriberId, #vmq_msg{routing_key=Topic,
                                              retain=IsRetain} = Msg,
                 AuthSuccess) ->
     HookArgs = [User, SubscriberId, QoS, Topic, Payload, unflag(IsRetain)],
+    CacheEnabled = application:get_env(vernemq, cache_acl, true),
+    case {CacheEnabled, get({acl, publish, Topic})} of
+      {true, undefined} ->
+        auth_on_publish_inner(User, SubscriberId, Msg, AuthSuccess, HookArgs);
+      {true, true} ->
+        AuthSuccess(Msg, HookArgs);
+      {true, false} ->
+        {error, not_allowed};
+      {false, _} ->
+        auth_on_publish_inner(User, SubscriberId, Msg, AuthSuccess, HookArgs)
+    end.
+
+
+-spec auth_on_publish_inner(username(), subscriber_id(), msg(),
+                      fun((msg(), list()) -> {ok, msg()} | {error, atom()}), any()
+                        ) -> {ok, msg()} | {error, atom()}.
+auth_on_publish_inner(User, SubscriberId, #vmq_msg{routing_key=Topic,
+                                             payload=Payload,
+                                             qos=QoS,
+                                             retain=IsRetain} = Msg,
+                AuthSuccess, HookArgs) ->
     case vmq_plugin:all_till_ok(auth_on_publish, HookArgs) of
         ok ->
+            put({acl, publish, Topic}, true),
             AuthSuccess(Msg, HookArgs);
         {ok, ChangedPayload} when is_binary(ChangedPayload) ->
             HookArgs1 = [User, SubscriberId, QoS, Topic, ChangedPayload, unflag(IsRetain)],
@@ -649,9 +671,11 @@ auth_on_publish(User, SubscriberId, #vmq_msg{routing_key=Topic,
                                     mountpoint=ChangedMountpoint},
                         HookArgs1);
         {error, Re} ->
+            put({acl, publish, Topic}, false),
             lager:error("can't auth publish ~p due to ~p", [HookArgs, Re]),
             {error, not_allowed}
     end.
+
 
 -spec publish(cap_settings(), module(), username(), subscriber_id(), msg()) ->  {ok, msg()} | {error, atom()}.
 publish(CAPSettings, RegView, User, SubscriberId, Msg) ->
